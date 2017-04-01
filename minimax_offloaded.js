@@ -1,7 +1,23 @@
-var currentlyCalculating = false;
+importScripts('lib/js/chess.js');
 
 var board,
+    positionCount,
     game = new Chess();
+
+/* Web worker msg handling */
+onmessage = function(e) {
+    var input = e.data;
+    // Prepare Game from passed-in fen
+    game = new Chess(input.fen);
+    // Local copy of position count, will be broadcasted back to UI thread.
+    positionCount = 0;
+    // Calculate
+    console.log("Params: " + input.depth + ", " + game.fen() + ", " + input.isMaximisingPlayer);
+
+    var bestMove = minimaxRoot(input.depth, game, input.isMaximisingPlayer);
+    // Post back to UI thread
+    postMessage({move: bestMove, positionCount: positionCount});
+}    
 
 /*The "AI" part starts here */
 
@@ -12,6 +28,7 @@ var minimaxRoot =function(depth, game, isMaximisingPlayer) {
     var bestMoveFound;
 
     for(var i = 0; i < newGameMoves.length; i++) {
+
         var newGameMove = newGameMoves[i]
         game.ugly_move(newGameMove);
         var value = minimax(depth - 1, game, -10000, 10000, !isMaximisingPlayer);
@@ -29,12 +46,12 @@ var minimax = function (depth, game, alpha, beta, isMaximisingPlayer) {
     if (depth === 0) {
         return -evaluateBoard(game.board());
     }
-
     var newGameMoves = game.ugly_moves();
 
     if (isMaximisingPlayer) {
         var bestMove = -9999;
         for (var i = 0; i < newGameMoves.length; i++) {
+
             game.ugly_move(newGameMoves[i]);
             bestMove = Math.max(bestMove, minimax(depth - 1, game, alpha, beta, !isMaximisingPlayer));
             game.undo();
@@ -177,166 +194,3 @@ var getPieceValue = function (piece, x, y) {
     var absoluteValue = getAbsoluteValue(piece, piece.color === 'w', x ,y);
     return piece.color === 'w' ? absoluteValue : -absoluteValue;
 };
-
-
-/* board visualization and games state handling */
-
-var onDragStart = function (source, piece, position, orientation) {
-    if (game.in_checkmate() === true || game.in_draw() === true ||
-        piece.search(/^b/) !== -1) {
-        return false;
-    }
-};
-
-var makeBestMove = function () {
-    getBestMove(game, function(bestMove) {
-        game.ugly_move(bestMove);
-        currentlyCalculating = false;
-        board.position(game.fen());
-        renderMoveHistory(game.history());
-        if (game.game_over()) {
-            alert('Game over');
-        }        
-    });
-
-};
-
-
-var positionCount;
-var getBestMove = function (game, cb) {
-    if (game.game_over()) {
-        alert('Game over');
-    }
-
-    positionCount = 0;
-    var depth = parseInt($('#search-depth').find(':selected').text());
-
-    var d = new Date().getTime();
-    currentlyCalculating = true;
-    offload(depth, function(bestMove) {
-        var d2 = new Date().getTime();
-        var moveTime = (d2 - d);
-        var positionsPerS = ( positionCount * 1000 / moveTime);
-
-        $('#position-count').text(positionCount);
-        $('#time').text(moveTime/1000 + 's');
-        $('#positions-per-s').text(positionsPerS);
-        cb(bestMove);
-
-    });
-
-};
-
-var renderMoveHistory = function (moves) {
-    var historyElement = $('#move-history').empty();
-    historyElement.empty();
-    for (var i = 0; i < moves.length; i = i + 2) {
-        historyElement.append('<span>' + moves[i] + ' ' + ( moves[i + 1] ? moves[i + 1] : ' ') + '</span><br>')
-    }
-    historyElement.scrollTop(historyElement[0].scrollHeight);
-
-};
-
-var onDrop = function (source, target) {
-
-    if (currentlyCalculating) {
-        console.log("Not your move");
-        return;
-    }
-
-    var move = game.move({
-        from: source,
-        to: target,
-        promotion: 'q'
-    });
-
-    removeGreySquares();
-    if (move === null) {
-        return 'snapback';
-    }
-
-    renderMoveHistory(game.history());
-    window.setTimeout(makeBestMove, 250);
-};
-
-var onSnapEnd = function () {
-    board.position(game.fen());
-};
-
-var onMouseoverSquare = function(square, piece) {
-    var moves = game.moves({
-        square: square,
-        verbose: true
-    });
-
-    if (moves.length === 0) return;
-
-    greySquare(square);
-
-    for (var i = 0; i < moves.length; i++) {
-        greySquare(moves[i].to);
-    }
-};
-
-var onMouseoutSquare = function(square, piece) {
-    removeGreySquares();
-};
-
-var removeGreySquares = function() {
-    $('#board .square-55d63').css('background', '');
-};
-
-var greySquare = function(square) {
-    var squareEl = $('#board .square-' + square);
-
-    var background = '#a9a9a9';
-    if (squareEl.hasClass('black-3c85d') === true) {
-        background = '#696969';
-    }
-
-    squareEl.css('background', background);
-};
-
-var cfg = {
-    draggable: true,
-    position: 'start',
-    onDragStart: onDragStart,
-    onDrop: onDrop,
-    onMouseoutSquare: onMouseoutSquare,
-    onMouseoverSquare: onMouseoverSquare,
-    onSnapEnd: onSnapEnd
-};
-board = ChessBoard('board', cfg);
-
-
-// OFFLOAD CALCULATING
-// 
-function offload(depth, bestMoveCallback) {
-    console.log("Starting calculation with Web Worker (if present)...")
-
-    if (window.Worker) {
-        console.log("Web Worker present -> offloading to separate process");
-        var worker = new Worker('minimax_offloaded.js');
-        worker.postMessage({
-            depth: depth, 
-            fen: game.fen(), 
-            isMaximisingPlayer: true
-        });
-
-        worker.onmessage = function(e) {
-            var result = e.data;
-            console.log("Result back from offloaded script");
-            console.log(result);
-            // Update UI threads positionCount
-            positionCount = result.positionCount;
-            bestMoveCallback(result.move);
-        }
-
-
-    } else {
-        console.log("Web Worker not present -> proceeding with sync calculations");
-        var bestMove = minimaxRoot(depth, game, true)
-        bestMoveCallback(bestMove);
-    }
-    
-}
